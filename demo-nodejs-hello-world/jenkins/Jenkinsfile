@@ -1,0 +1,131 @@
+pipeline {
+    agent  {
+        label 'master'
+    }
+    
+    environment {
+        PROJECT = "nodejs-hello-world"
+        IMAGE_NAME = "roxsross/node-demo"
+        DEPLOY_COMMIT_HASH = sh(returnStdout: true, script: "git rev-parse HEAD | cut -c1-7").trim()
+        registryCredential = 'docker-registry'
+        SCANNER_HOME = tool 'SonarQubeScanner'
+        ORGANIZATION = "roxsross"
+        PROJECT_NAME = "demo-hello-world"
+    }
+    
+    options {
+        timeout(time: 1, unit: 'HOURS') 
+        
+    }
+    
+    stages{
+        stage('Clone'){
+            steps {
+               git branch: 'main', url: 'git@github.com:roxsross/demo-nodejs-hello-world.git'
+            }
+        }
+        
+        stage('Sonar Scanning'){
+            steps {
+                echo "sonarqube Scanning for the project ${PROJECT} "
+                withSonarQubeEnv('SonarCloud') {
+                   sh '''$SCANNER_HOME/bin/sonar-scanner -Dsonar.organization=$ORGANIZATION \
+                         -Dsonar.projectKey=$PROJECT_NAME \
+                         -Dsonar.sources=${WORKSPACE}/src'''
+                }
+                
+            }
+        }
+
+        stage("Quality Gate") {
+            steps {
+               timeout(time: 10, unit: 'MINUTES') {
+               waitForQualityGate abortPipeline: true
+              }
+           }
+        }
+        
+        stage('Build & Test'){
+            steps {
+                echo "Installing Dependencies"
+                  sh "npm install"
+                echo "Running Unit Tests"
+                  sh "npm run test"
+            }
+        } 
+        
+        stage(' Dependency Vulnerability Check'){
+            tools {
+                snyk 'snyk'
+            }
+            steps {
+                echo " Performing Dependency  Check  "
+                snykSecurity(
+                   severity: 'high',
+                   snykInstallation: 'snyk',
+                   snykTokenId: 'snyk',
+                   targetFile: 'package.json',
+                   failOnIssues: 'false'
+                )		
+            }
+        }
+        
+        stage('Build and Sign Docker image'){
+            steps {
+                echo "Build Docker image "
+                script{
+                  dockerImage = docker.build IMAGE_NAME
+                }
+            }
+        }
+        
+        stage('Image Scanning'){
+
+            steps {
+                echo "Image Scanning "
+                snykSecurity(
+                   severity: 'high',
+                   snykInstallation: 'snyk',
+                   snykTokenId: 'snyk',
+                   targetFile: 'Dockerfile',
+                   additionalArguments: '--docker roxsross/node-demo:latest',
+                   failOnIssues: 'false'
+                )	
+            }
+        } 
+
+        stage('Push To Docker Repo'){
+            steps {
+                echo "pushing image to docker repository "
+                 script {
+                   docker.withRegistry( '', registryCredential ) {
+                   dockerImage.push("$DEPLOY_COMMIT_HASH")
+                   dockerImage.push('latest')
+                 }
+                }     
+            }
+        }
+
+        stage('Deploy'){
+            steps{
+                echo "Deploying to dev cluster"
+                script{
+                    withAWS(credentials: 'aws-dev', region: 'us-west-2') {
+                      sh "aws eks update-kubeconfig --name observability"
+                      sh "helm upgrade --install ${PROJECT} ${WORKSPACE}/chart -f ${WORKSPACE}/chart/env/${JOB_BASE_NAME}.yaml --set image.tag=${DEPLOY_COMMIT_HASH} -n ${JOB_BASE_NAME} "
+                    }                     
+                }
+            }
+        }
+        
+    }
+    post {
+     success {
+      echo 'Notify the user about the build Completion'
+    }
+    failure {
+        echo 'Notify DevOps Team about Build Failure'
+    }
+  }
+  
+}
