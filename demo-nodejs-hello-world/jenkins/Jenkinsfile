@@ -21,7 +21,7 @@ pipeline {
     stages{
         stage('Clone'){
             steps {
-               git branch: 'main', url: 'git@github.com:roxsross/demo-nodejs-hello-world.git'
+               git branch: 'master', url: 'git@github.com:roxsross/demo-nodejs-hello-world.git'
             }
         }
         
